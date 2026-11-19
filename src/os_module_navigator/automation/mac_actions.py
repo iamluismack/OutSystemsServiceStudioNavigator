@@ -18,9 +18,17 @@ Allowed interactions, all scoped to Service Studio:
   pointer is moved back afterwards,
 * one left click at a point inside a Service Studio window (``click_in_window``),
   only when a system-wide hit test at that point returns an element of exactly
-  that window. Used for the module toolbar's Manage Dependencies button and for
-  the Manage Dependencies dialog's checkboxes, filters and buttons (Chromium
-  content AX cannot press); callers locate and re-verify targets from screenshots,
+  that window. Used for the module toolbar's Manage Dependencies button, the
+  Manage Dependencies dialog's checkboxes, filters and buttons, and the module
+  search drop-down's "Search in this Module" row (Chromium content AX cannot
+  press); callers locate and re-verify targets from screenshots,
+* Cmd+F in the main window, then Cmd+A and the element name, only through
+  ``type_module_search`` (the module search box opened by Cmd+F),
+* one right click on the elements tree (``right_click_in_window``), with the same
+  hit test as ``click_in_window``; it only opens a context menu,
+* one left click on a context menu item (``click_menu_item``), only when the hit
+  test returns an ``AXMenuItem`` of that menu window. Callers read the item's text
+  from a screenshot first; only "Find Usages in all Modules" is clicked,
 * AXPress on a module tab's own close button, only when the tab's live caption
   names the expected module and shows no unsaved-changes marker.
 
@@ -41,6 +49,7 @@ from os_module_navigator.errors import FocusError, NavigatorError, UnsavedChange
 
 # macOS virtual key codes.
 KEY_A = 0x00
+KEY_F = 0x03
 KEY_O = 0x1F
 KEY_RETURN = 0x24
 KEY_ESCAPE = 0x35
@@ -52,6 +61,7 @@ ALLOWED_KEYS: dict[str, tuple[int, str]] = {
     "up": (KEY_UP, ""),
     "down": (KEY_DOWN, ""),
     "cmd+o": (KEY_O, "cmd"),
+    "cmd+f": (KEY_F, "cmd"),
     "escape": (KEY_ESCAPE, ""),
 }
 MAX_TYPED_CHARS = 200
@@ -161,6 +171,27 @@ def type_search_text(pid: int, dialog: Any, text: str) -> None:
         _post_key(pid, 0, text=ch)
 
 
+def type_module_search(pid: int, window: Any, text: str) -> None:
+    """Replace the module search box's text (Cmd+A, then the text) in the main window.
+
+    The caller opens the box with Cmd+F first and checks the screenshot afterwards.
+    """
+    if mac_ax.role(window) != "AXWindow" or str(mac_ax.attr(window, "AXTitle") or "") != (
+        ss.MAIN_WINDOW_TITLE
+    ):
+        raise NavigatorError("The module search text may only be typed into the main window.")
+    if len(text) > MAX_TYPED_CHARS or any(ord(ch) < 32 or ch.isspace() for ch in text):
+        raise NavigatorError(
+            "An element name is too long or contains spaces or control characters."
+        )
+    _check_focus(pid, window)
+    _post_key(pid, KEY_A, "cmd")
+    time.sleep(0.05)
+    for ch in text:
+        _check_focus(pid, window)
+        _post_key(pid, 0, text=ch)
+
+
 def confirm_open(pid: int, dialog: Any, verify: Callable[[], bool]) -> None:
     """Press Return in the search dialog, only if ``verify()`` confirms the selected row."""
     if str(mac_ax.attr(dialog, "AXTitle") or "") != ss.OPEN_FROM_ENVIRONMENT_TITLE:
@@ -196,7 +227,35 @@ def click_in_window(pid: int, window: Any, point: tuple[float, float]) -> None:
     _hid_click(point)
 
 
-def _hid_click(point: tuple[float, float]) -> None:
+def right_click_in_window(pid: int, window: Any, point: tuple[float, float]) -> None:
+    """One right click at a screen point inside ``window`` (opens a context menu)."""
+    ensure_focus(pid, window)
+    hit = mac_ax.element_at(*point)
+    if hit is None or mac_ax.attr(hit, "AXWindow") != window:
+        raise NavigatorError("Something covers the Service Studio window; nothing was clicked.")
+    _hid_click(point, right=True)
+
+
+def click_menu_item(pid: int, menu_window: Any, point: tuple[float, float]) -> None:
+    """One left click on a context menu item, only if the point is that menu's item."""
+    if not mac_ax.is_frontmost(pid):
+        raise FocusError("Service Studio lost the foreground; the menu was not clicked.")
+    hit = mac_ax.element_at(*point)
+    item = hit
+    for _ in range(6):  # the hit can be the item's text or icon inside it
+        if item is None or mac_ax.role(item) == "AXMenuItem":
+            break
+        item = mac_ax.attr(item, "AXParent")
+    if (
+        item is None
+        or mac_ax.role(item) != "AXMenuItem"
+        or (mac_ax.attr(item, "AXWindow") != menu_window)
+    ):
+        raise NavigatorError("The context menu item is not under the pointer; nothing was clicked.")
+    _hid_click(point)
+
+
+def _hid_click(point: tuple[float, float], *, right: bool = False) -> None:
     """Click at ``point`` (Avalonia ignores clicks posted to its process), then put the
     pointer back where the user left it."""
     q = _quartz()
@@ -204,8 +263,14 @@ def _hid_click(point: tuple[float, float]) -> None:
 
     original = NSEvent.mouseLocation()  # Cocoa coords: origin bottom-left of main display
     screen_h = q.CGDisplayPixelsHigh(q.CGMainDisplayID())
-    for kind in (q.kCGEventLeftMouseDown, q.kCGEventLeftMouseUp):
-        event = q.CGEventCreateMouseEvent(None, kind, point, q.kCGMouseButtonLeft)
+    if right:
+        kinds = (q.kCGEventRightMouseDown, q.kCGEventRightMouseUp)
+        button = q.kCGMouseButtonRight
+    else:
+        kinds = (q.kCGEventLeftMouseDown, q.kCGEventLeftMouseUp)
+        button = q.kCGMouseButtonLeft
+    for kind in kinds:
+        event = q.CGEventCreateMouseEvent(None, kind, point, button)
         q.CGEventSetIntegerValueField(event, q.kCGMouseEventClickState, 1)
         q.CGEventPost(q.kCGHIDEventTap, event)
         time.sleep(0.05)

@@ -8,6 +8,7 @@ from fastmcp.exceptions import ToolError
 from os_module_navigator.errors import (
     AmbiguousModuleError,
     DependencyNotFoundError,
+    ElementNotFoundError,
     ModuleNotFoundInEnvironmentError,
     ServiceStudioNotRunningError,
     TooManyOpenModulesError,
@@ -16,7 +17,9 @@ from os_module_navigator.errors import (
 from os_module_navigator.models import (
     CloseModuleResult,
     DependencyChangeResult,
+    FindUsagesResult,
     ModuleInfo,
+    ModuleUsages,
     OpenModule,
     OpenModuleResult,
     OpenModulesResult,
@@ -101,6 +104,22 @@ class FakeProvider:
             message="ok",
         )
 
+    async def find_usages(self, module_name, element_name):
+        self.calls.append(("find_usages", module_name, element_name))
+        if self.error:
+            raise self.error
+        return FindUsagesResult(
+            module_name=module_name,
+            element_name=element_name,
+            total_usages=20,
+            consumer_modules_count=2,
+            modules=[
+                ModuleUsages(module_name=module_name, usages=14, is_producer=True),
+                ModuleUsages(module_name="Shipping_BL", usages=6),
+            ],
+            message="ok",
+        )
+
 
 def call(provider, tool, args=None):
     async def run():
@@ -131,7 +150,10 @@ def test_tools_are_listed_with_annotations():
         "add_dependency",
         "remove_dependency",
         "refresh_dependencies",
+        "find_usages",
     }
+    assert tools["find_usages"].annotations.read_only_hint is True
+    assert tools["find_usages"].input_schema["required"] == ["module_name", "element_name"]
     assert tools["get_open_modules"].annotations.read_only_hint is True
     assert tools["close_module"].input_schema["required"] == ["module_name"]
     assert tools["search_modules"].annotations.read_only_hint is True
@@ -267,3 +289,27 @@ def test_elements_are_passed_to_the_provider():
         {"module_name": "M1", "dependency_name": "Charts", "elements": ["DonutChart"]},
     )
     assert provider.calls == [("add_dependency", "M1", "Charts", ["DonutChart"])]
+
+
+def test_find_usages_tool():
+    provider = FakeProvider()
+    result = call(
+        provider,
+        "find_usages",
+        {"module_name": "Orders_BL", "element_name": "Order_CreateOrUpdateWrapper"},
+    )
+    data = result.structured_content
+    assert data["total_usages"] == 20
+    assert [m["module_name"] for m in data["modules"]] == ["Orders_BL", "Shipping_BL"]
+    assert data["modules"][0]["is_producer"] is True
+    assert provider.calls == [("find_usages", "Orders_BL", "Order_CreateOrUpdateWrapper")]
+
+
+def test_find_usages_element_not_found_error():
+    provider = FakeProvider(ElementNotFoundError("nope"))
+    payload = error_payload(provider, "find_usages", {"module_name": "M", "element_name": "X"})
+    assert payload["code"] == "element_not_found"
+
+
+def test_instructions_mention_find_usages():
+    assert "find_usages" in __import__("os_module_navigator.server").server.INSTRUCTIONS

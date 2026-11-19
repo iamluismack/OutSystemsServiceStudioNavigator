@@ -7,6 +7,7 @@ import logging
 from os_module_navigator.models import (
     CloseModuleResult,
     DependencyChangeResult,
+    FindUsagesResult,
     OpenModuleResult,
     OpenModulesResult,
     SearchResult,
@@ -61,4 +62,9 @@ class ModuleService:
     ) -> DependencyChangeResult:
         result = await self._provider.refresh_dependencies(module_name, dependency_name)
         log.info("refresh_dependencies finished with status %s", result.status)
+        return result
+
+    async def find_usages(self, module_name: str, element_name: str) -> FindUsagesResult:
+        result = await self._provider.find_usages(module_name, element_name)
+        log.info("find_usages found %d usage(s)", result.total_usages)
         return result

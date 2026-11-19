@@ -133,3 +133,19 @@ class AmbiguousDependencyElementError(NavigatorError):
     def __init__(self, message: str, candidates: list[str]) -> None:
         super().__init__(message)
         self.candidates = candidates
+
+
+class ElementNotFoundError(NavigatorError):
+    """The module search did not open exactly one element with that name."""
+
+    code = "element_not_found"
+
+
+class UsagesUnavailableError(NavigatorError):
+    """Find Usages could not be started or its results could not be read."""
+
+    code = "usages_unavailable"
+
+
+class UnsupportedPlatformError(NavigatorError):
+    code = "unsupported_platform"

@@ -2,7 +2,7 @@
 
 Verified live against Service Studio 11.55.96 for Mac (Apple silicon, macOS 26)
 with every tool: status, open modules, search, open (new and already-open
-modules), close, the not-found path and dependencies (below).
+modules), close, the not-found path, dependencies and find usages (both below).
 
 ## What macOS exposes
 
@@ -73,6 +73,24 @@ Notes:
   appear. If the prompt has a different window title on Mac, the call fails
   with `unexpected_dialog` naming it.
 - Apply leaves the module with unsaved changes. Nothing is saved or published.
+
+## Find Usages (find_usages)
+
+Verified live on Service Studio 11.55.96 for Mac: an element with 20
+usages in 2 modules, one with 9 usages in 4 modules, and a name that does not
+exist (`element_not_found`). About 9 seconds per call.
+
+| Step | macOS |
+|---|---|
+| Bring the module to front | Same as Manage Dependencies (tab caption click) |
+| Open the element | Cmd+F in the main window (module search box), Cmd+A, the element name. The drop-down lists "Search in ..." rows and then, per element type, the elements whose name matches. Exactly one suggestion with the exact name (read by OCR, left-aligned with "Search in this Module") is clicked with `click_in_window`. "Search in this Module" itself is never used: it lists occurrences next to a *Replace all occurrences* button |
+| Check the selection | The elements tree row and the properties panel header both show the name (OCR of the right panel) |
+| Context menu | One right click on the tree row (`right_click_in_window`, hit-tested). The menu is a native popup (untitled `AXWindow` with `AXMenuItem`s that carry no text), captured by its bounds and read by OCR |
+| Find Usages in all Modules | `click_menu_item`: a left click only when the hit test returns an `AXMenuItem` of that popup |
+| Read the result | OCR of the bottom pane: tab `'<name>' usages in all modules`, rows `Module Name | Usages` (`(local)` = the module itself), footer `N usages found in M consumer modules`. Read until the pane names the element and two reads agree. Fewer rows than the footer reports sets `possibly_truncated` (the pane would need scrolling) |
+| On failure | Escape closes the drop-down or menu |
+
+Not supported on Windows yet (`unsupported_platform`).
 
 ## Permissions
 

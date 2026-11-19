@@ -235,3 +235,32 @@ def window_number(pid: int, title: str) -> int | None:
         if info.get("kCGWindowOwnerPID") == pid and info.get("kCGWindowName") == title:
             return int(info["kCGWindowNumber"])
     return None
+
+
+def is_menu_window(window: MacWindow) -> bool:
+    """True for an untitled popup holding menu items (Service Studio's context menus)."""
+    if window.role is not ss.WindowRole.OTHER or window.title:
+        return False
+    return any(role(node) == "AXMenuItem" for node in walk(window.element, limit=80))
+
+
+def menu_windows(pid: int) -> list[MacWindow]:
+    return [w for w in windows(pid) if is_menu_window(w)]
+
+
+def window_number_at(pid: int, frame_: tuple[float, float, float, float]) -> int | None:
+    """CoreGraphics window id of the on-screen Service Studio window with these bounds."""
+    import Quartz
+
+    infos = Quartz.CGWindowListCopyWindowInfo(
+        Quartz.kCGWindowListOptionOnScreenOnly, Quartz.kCGNullWindowID
+    )
+    for info in infos or []:
+        if info.get("kCGWindowOwnerPID") != pid:
+            continue
+        bounds = info.get("kCGWindowBounds") or {}
+        found = (bounds.get("X"), bounds.get("Y"), bounds.get("Width"), bounds.get("Height"))
+        pairs = zip(found, frame_, strict=True)
+        if all(a is not None and abs(float(a) - b) < 1.5 for a, b in pairs):
+            return int(info["kCGWindowNumber"])
+    return None

@@ -36,6 +36,7 @@ from os_module_navigator.errors import (
     DependencyChangeFailedError,
     DependencyElementNotFoundError,
     DependencyNotFoundError,
+    ElementNotFoundError,
     ModuleNotFoundInEnvironmentError,
     ModuleNotOpenError,
     NavigatorError,
@@ -45,13 +46,16 @@ from os_module_navigator.errors import (
     TooManyOpenModulesError,
     UnexpectedDialogError,
     UnsavedChangesError,
+    UsagesUnavailableError,
     WrongDependencySelectedError,
     WrongModuleOpenedError,
 )
 from os_module_navigator.models import (
     CloseModuleResult,
     DependencyChangeResult,
+    FindUsagesResult,
     ModuleInfo,
+    ModuleUsages,
     OpenModule,
     OpenModuleResult,
     OpenModulesResult,
@@ -86,6 +90,15 @@ def _to_module(row: ss.ModuleSearchRow) -> ModuleInfo:
         last_changed=cells.get("Changed") or None,
         changed_by=cells.get("By") or None,
     )
+
+
+def _pane_is_for(pane: ss.UsagesPane, element_name: str) -> bool:
+    """The pane tab shows the element name in quotes, cut short when it is long."""
+    title = pane.title.rstrip(".…").strip()
+    if not title:
+        return False
+    fold = ss.fold_ocr
+    return fold(element_name).startswith(fold(title)) and len(title) >= min(len(element_name), 12)
 
 
 def _module_tabs(state: UiState) -> list[tuple[int, ss.ShellTab, ss.ModuleCaption]]:
@@ -663,6 +676,103 @@ class DesktopGUINavigator:
             message=f"{row_name!r} was {verb} the dependencies of {module_name!r}.{note}",
         )
 
+    # --- find usages -----------------------------------------------------------------
+
+    def _bring_module_to_front(self, module_name: str) -> str:
+        state = self._ready_state(require_connected=False)
+        tabs = _module_tabs(state)
+        match = next((m for m in tabs if ss.same_module_name(m[2].name, module_name)), None)
+        if match is None:
+            raise ModuleNotOpenError(
+                f"No open module is named {module_name!r}.",
+                open_modules=[c.name for _, _, c in tabs],
+            )
+        index, tab, caption = match
+        if not tab.selected:
+            self.driver.select_tab(index)
+            self._wait_tab_selected(caption.name)
+        return caption.name
+
+    def _wait_usages(self, element_name: str) -> ss.UsagesPane:
+        """Poll the Find Usages pane until it shows this element and reads the same twice."""
+        deadline = self._clock() + self.config.usages_timeout_s
+        previous: ss.UsagesPane | None = None
+        while True:
+            self._sleep(self.config.poll_interval_s)
+            pane = self.driver.read_usages()
+            if pane is not None and _pane_is_for(pane, element_name):
+                if pane == previous:
+                    return pane
+                previous = pane
+            else:
+                previous = None
+            dialogs = self.driver.read_state().dialogs
+            unexpected = [d for d in dialogs if d not in ss.TRANSIENT_DIALOG_TITLES]
+            if unexpected:
+                raise UnexpectedDialogError(
+                    f"Service Studio is showing a dialog ({unexpected[0]!r}) while finding "
+                    "usages. Please handle it in Service Studio."
+                )
+            if self._clock() > deadline:
+                raise AutomationTimeoutError(
+                    f"The usages of {element_name!r} did not appear in time."
+                )
+
+    def find_usages(self, module_name: str, element_name: str) -> FindUsagesResult:
+        module_name = self._validate(module_name, "Module name")
+        element_name = self._validate(element_name, "Element name")
+        if " " in element_name:
+            raise NavigatorError("Element names contain no spaces.")
+        module = self._bring_module_to_front(module_name)
+        try:
+            self.driver.select_element(
+                element_name, self.config.element_select_timeout_s, self.config.poll_interval_s
+            )
+            self.driver.open_usages_in_all_modules(
+                element_name, self.config.element_select_timeout_s, self.config.poll_interval_s
+            )
+        except (ElementNotFoundError, UsagesUnavailableError):
+            self._dismiss_popups_quietly()
+            raise
+        pane = self._wait_usages(element_name)
+        modules = [
+            ModuleUsages(
+                module_name=module if name == ss.LOCAL_USAGES_LABEL else name,
+                usages=count,
+                is_producer=name == ss.LOCAL_USAGES_LABEL,
+            )
+            for name, count in pane.rows
+        ]
+        truncated = len(modules) < pane.consumer_modules or (
+            sum(m.usages for m in modules) < pane.total_usages
+        )
+        consumers = [m.module_name for m in modules if not m.is_producer]
+        message = (
+            f"{pane.total_usages} usage(s) of {element_name!r} in {pane.consumer_modules} "
+            f"module(s)"
+            + (f"; other modules: {', '.join(consumers)}" if consumers else "; no other module")
+            + (
+                ". The list may be incomplete (scroll the pane in Service Studio)."
+                if truncated
+                else "."
+            )
+        )
+        return FindUsagesResult(
+            module_name=module,
+            element_name=element_name,
+            total_usages=pane.total_usages,
+            consumer_modules_count=pane.consumer_modules,
+            modules=modules,
+            possibly_truncated=truncated,
+            message=message,
+        )
+
+    def _dismiss_popups_quietly(self) -> None:
+        try:
+            self.driver.dismiss_popups()
+        except NavigatorError:
+            log.warning("Could not close Service Studio's popup.")
+
     def search(self, query: str) -> SearchResult:
         query = self._validate(query, "Query")
         state = self._ready_state()
@@ -834,6 +944,9 @@ class DesktopGUIProvider:
         return await self._run(
             lambda: self._navigator.refresh_dependency(module_name, dependency_name)
         )
+
+    async def find_usages(self, module_name: str, element_name: str) -> FindUsagesResult:
+        return await self._run(lambda: self._navigator.find_usages(module_name, element_name))
 
     def close(self) -> None:
         self._executor.shutdown(wait=False, cancel_futures=True)

@@ -2,9 +2,10 @@
 
 A local MCP server that lets an agent (Claude Code, Codex, ...) drive the
 **OutSystems Service Studio 11 desktop app**: search for and open modules,
-and manage their dependencies. The official OutSystems (`servicestudio`) MCP
-only works on modules that are open in Service Studio and cannot change
-dependencies; this server covers those steps.
+manage their dependencies and find the usages of an element across all
+modules. The official OutSystems (`servicestudio`) MCP only works on modules
+that are open in Service Studio and cannot change dependencies or list
+consumers; this server covers those steps.
 
 Runs on Windows (UI Automation) and macOS (Accessibility + on-device OCR, see
 [docs/macos.md](docs/macos.md)). Background:
@@ -23,6 +24,7 @@ Runs on Windows (UI Automation) and macOS (Accessibility + on-device OCR, see
 | `add_dependency(module_name, dependency_name)` | Adds a dependency on **all public elements** of another module/extension through *Manage Dependencies* (Ctrl+Q on Windows; the toolbar button on macOS): searches, selects the row, picks the elements panel's *All* filter, ticks the module, presses *Apply* and waits for the dialog to close. The module must be open. Returns `applied` or `already_present` (also when only some elements are referenced). Optional `elements` adds only those public elements (exact names) |
 | `remove_dependency(module_name, dependency_name)` | Same dialog, unticks the dependency and applies. Returns `applied` or `not_a_dependency`; optional `elements` removes only those. If Service Studio asks about outdated references after Apply, the server answers No, presses *Refresh all* and applies again. Any other dialog is reported as `unexpected_dialog` |
 | `refresh_dependencies(module_name, dependency_name=None)` | Refreshes outdated or missing references through *Manage Dependencies*: *Refresh all* with no dependency, or only that dependency's *Refresh*, then *Apply*. Returns `applied` or `up_to_date` (nothing outdated). The per-dependency *Refresh* button and the apply path after a refresh have only been exercised against fakes so far |
+| `find_usages(module_name, element_name)` | Runs *Find Usages in all Modules* on an element of an open module (macOS only for now): opens the element from the module search drop-down (Cmd+F), right-clicks its row in the elements tree, clicks the menu item and reads the result pane. Returns each module with its usage count (`is_producer` marks the owner, Service Studio's "(local)"), the footer totals and `possibly_truncated`. Changes nothing |
 
 ### Open-module limit
 
@@ -39,13 +41,14 @@ Errors come back as tool errors whose text is JSON:
 
 - Service Studio state: `service_studio_not_running`, `window_not_found`,
   `not_connected`, `unexpected_dialog`, `focus_error`, `automation_timeout`,
-  `permission_missing` (macOS).
+  `permission_missing` (macOS), `unsupported_platform`.
 - Modules: `search_dialog_unavailable`, `module_not_found`, `ambiguous_module`,
   `wrong_module_opened`, `too_many_open_modules`, `module_not_open`,
   `module_has_unsaved_changes` (the last three include `open_modules`).
 - Dependencies: `dependencies_dialog_unavailable`, `dependency_not_found`,
   `ambiguous_dependency`, `wrong_dependency_selected`, `dependency_change_failed`,
   `dependency_element_not_found`, `ambiguous_dependency_element`.
+- Usages: `element_not_found`, `usages_unavailable`.
 
 ## Setup
 
@@ -152,7 +155,7 @@ uv run pytest
 
 ```
 src/os_module_navigator/
-  models.py                   # tool results (modules, dependencies, status)
+  models.py                   # tool results (modules, dependencies, usages, status)
   errors.py                   # NavigatorError subclasses with stable codes
   config.py                   # timeouts and limits
   diagnostics.py              # Phase 1 CLI (os-nav-diagnose)

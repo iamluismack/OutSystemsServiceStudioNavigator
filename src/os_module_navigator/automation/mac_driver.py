@@ -19,11 +19,13 @@ from os_module_navigator.automation.driver import UiState
 from os_module_navigator.automation.live import DependencyCheckbox, DependencyRoot
 from os_module_navigator.errors import (
     DependenciesDialogUnavailableError,
+    ElementNotFoundError,
     NavigatorError,
     SearchDialogUnavailableError,
     ServiceStudioNotRunningError,
     ServiceStudioWindowNotFoundError,
     UnexpectedDialogError,
+    UsagesUnavailableError,
 )
 
 # The module editor toolbar's "Manage Dependencies" (plug) button, in points from the
@@ -560,3 +562,116 @@ class MacServiceStudioDriver:
         mac_actions.ensure_focus(pid, window.element)
         mac_actions.press_keys(pid, window.element, ["escape"])
         self._dependency_query = self._element_query = None
+
+    # --- Find Usages -------------------------------------------------------------
+    #
+    # The module editor is Chromium content: read from screenshots of the main window,
+    # driven with Cmd+F and the element name, hit-tested clicks and one right click on
+    # the elements tree. The context menu is a native popup whose items have no text
+    # in AX, so it is read from its own screenshot before the item is clicked.
+
+    def _main_view(
+        self,
+    ) -> tuple[mac_ax.MacWindow, mac_ocr.Screenshot, float, list[mac_ocr.TextBox]]:
+        pid = self._pid()
+        main = self._main(pid)
+        mac_ax.require_screen_capture()
+        number = mac_ax.window_number(pid, ss.MAIN_WINDOW_TITLE)
+        shot = mac_ocr.capture_window(number) if number is not None else None
+        if shot is None or not main.frame:
+            raise UsagesUnavailableError("The Service Studio window could not be captured.")
+        return main, shot, shot.width / main.frame[2], mac_ocr.recognize_text(shot)
+
+    @staticmethod
+    def _to_screen(
+        window: mac_ax.MacWindow, scale: float, box: mac_ocr.TextBox
+    ) -> tuple[float, float]:
+        x, y, _, _ = window.frame or (0, 0, 0, 0)
+        return (x + (box.x + min(box.w, 200 * scale) / 2) / scale, y + box.cy / scale)
+
+    def select_element(self, name: str, timeout_s: float, poll_s: float) -> None:
+        """Open ``name`` from the module search drop-down's element suggestions and check
+        that the elements tree and the properties panel show it."""
+        pid = self._pid()
+        main = self._main(pid)
+        mac_actions.ensure_focus(pid, main.element)
+        mac_actions.press_keys(pid, main.element, ["cmd+f"])
+        time.sleep(0.6)
+        mac_actions.type_module_search(pid, main.element, name)
+        suggestions: list[mac_ocr.TextBox] = []
+        anchor_seen = False
+        deadline = time.monotonic() + min(timeout_s, 10.0)
+        while time.monotonic() < deadline:
+            time.sleep(poll_s)
+            main, _, scale, boxes = self._main_view()
+            anchor_seen, suggestions = mac_ocr.element_suggestions(boxes, name)
+            if anchor_seen and suggestions:
+                break
+        if len(suggestions) != 1:
+            self.dismiss_popups()
+            if not anchor_seen:
+                raise ElementNotFoundError("The module search drop-down did not open.")
+            raise ElementNotFoundError(
+                f"The module search suggests {len(suggestions)} elements named {name!r}; "
+                "nothing was opened."
+                if suggestions
+                else f"No element named {name!r} was found in this module."
+            )
+        mac_actions.click_in_window(pid, main.element, self._to_screen(main, scale, suggestions[0]))
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            time.sleep(poll_s)
+            _, shot, _, boxes = self._main_view()
+            if len(mac_ocr.element_rows(boxes, name, shot.width)) >= 2:
+                return
+        raise ElementNotFoundError(
+            f"Service Studio did not show {name!r} in the elements tree after opening it."
+        )
+
+    def open_usages_in_all_modules(self, name: str, timeout_s: float, poll_s: float) -> None:
+        """Right-click the element's tree row and choose 'Find Usages in all Modules'."""
+        pid = self._pid()
+        main, shot, scale, boxes = self._main_view()
+        rows = mac_ocr.element_rows(boxes, name, shot.width)
+        if len(rows) < 2:
+            raise ElementNotFoundError(f"{name!r} is not selected in the elements tree.")
+        if mac_ax.menu_windows(pid):
+            self.dismiss_popups()
+        mac_actions.right_click_in_window(pid, main.element, self._to_screen(main, scale, rows[0]))
+        menu = None
+        deadline = time.monotonic() + min(timeout_s, 5.0)
+        while menu is None and time.monotonic() < deadline:
+            time.sleep(poll_s / 2)
+            menus = mac_ax.menu_windows(pid)
+            menu = menus[0] if len(menus) == 1 else None
+        if menu is None or not menu.frame:
+            raise UsagesUnavailableError("The element's context menu did not open.")
+        number = mac_ax.window_number_at(pid, menu.frame)
+        menu_shot = mac_ocr.capture_window(number) if number is not None else None
+        if menu_shot is None:
+            self.dismiss_popups()
+            raise UsagesUnavailableError("The context menu could not be captured.")
+        found = mac_ocr.find_text(mac_ocr.recognize_text(menu_shot), mac_ocr.FIND_USAGES_ALL_ITEM)
+        if len(found) != 1:
+            self.dismiss_popups()
+            raise UsagesUnavailableError(
+                f"'{mac_ocr.FIND_USAGES_ALL_ITEM}' was not found in the element's context menu."
+            )
+        menu_scale = menu_shot.width / menu.frame[2]
+        box = found[0]
+        point = (
+            menu.frame[0] + (box.x + box.w / 2) / menu_scale,
+            menu.frame[1] + box.cy / menu_scale,
+        )
+        mac_actions.click_menu_item(pid, menu.element, point)
+
+    def read_usages(self) -> ss.UsagesPane | None:
+        _, _, _, boxes = self._main_view()
+        return mac_ocr.parse_usages_pane(boxes)
+
+    def dismiss_popups(self) -> None:
+        """Close an open context menu or search drop-down with Escape."""
+        pid = self._pid()
+        main = self._main(pid)
+        mac_actions.ensure_focus(pid, main.element)
+        mac_actions.press_keys(pid, main.element, ["escape"])

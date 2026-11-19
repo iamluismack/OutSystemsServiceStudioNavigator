@@ -96,3 +96,28 @@ class DependencyChangeResult(BaseModel):
         "'not_a_dependency' (remove: nothing to do) or 'up_to_date' (refresh: nothing to do)."
     )
     message: str
+
+
+class ModuleUsages(BaseModel):
+    module_name: str
+    usages: int = Field(description="Number of usages Service Studio counts in that module.")
+    is_producer: bool = Field(
+        default=False, description="True for the module that owns the element ('(local)')."
+    )
+
+
+class FindUsagesResult(BaseModel):
+    module_name: str = Field(description="Module that owns the element.")
+    element_name: str
+    total_usages: int = Field(description="Total from the pane footer.")
+    consumer_modules_count: int = Field(
+        description="Modules with usages, from the pane footer (includes the owner if it "
+        "uses the element itself)."
+    )
+    modules: list[ModuleUsages]
+    possibly_truncated: bool = Field(
+        default=False,
+        description="True when fewer rows were read than the footer reports (the list "
+        "is longer than the pane shows).",
+    )
+    message: str

@@ -241,3 +241,95 @@ def test_module_suffix_read_as_space_is_rejoined():
     plain = {"Module": "ORDERS Acme - ORDERS", "Application": ""}
     mac_ocr._split_merged_module(plain)
     assert plain["Module"] == "ORDERS" and plain["Application"] == "Acme - ORDERS"
+
+
+# Find Usages pane and elements tree, real Vision output (main window at 2x).
+USAGES_SCREEN = [
+    (672, 1026, 116, 29, "Debugger"),
+    (471, 1026, 141, 26, "TrueChange"),
+    (848, 1027, 518, 28, "Q 'Order_CreateOrUpdateWrapper' usage"),
+    (804, 1086, 91, 32, "Usages"),
+    (402, 1086, 163, 29, "Module Name"),
+    (804, 1137, 119, 31, "14 usages"),
+    (402, 1137, 75, 28, "(local)"),
+    (807, 1187, 107, 29, "6 usages"),
+    (402, 1187, 201, 31, "Shipping_BL"),
+    (414, 1667, 455, 25, "20 usages found in 2 consumer modules"),
+    (1344, 1667, 63, 22, "Close"),
+    (1592, 945, 455, 35, "• Order_Createlnvoicelmports"),
+    (1592, 986, 449, 35, "• Order_CreateOrUpdateWrapper"),
+    (1545, 1061, 414, 28, "Order_CreateOrUpdateWrapper"),
+    (1551, 1093, 154, 22, "Server Action"),
+    (1736, 1171, 374, 28, "Order_CreateOrUpdateWrapp"),
+    (1739, 1137, 160, 28, "Yes"),
+    (942, 182, 400, 28, "Order_CreateOrUpdateWrapper"),
+]
+
+
+def test_usages_pane_rows_and_footer():
+    pane = mac_ocr.parse_usages_pane(boxes(USAGES_SCREEN))
+    assert pane is not None
+    assert pane.title == "Order_CreateOrUpdateWrapper"
+    assert pane.rows == [("(local)", 14), ("Shipping_BL", 6)]
+    assert (pane.total_usages, pane.consumer_modules) == (20, 2)
+
+
+def test_usages_pane_absent_without_footer():
+    assert mac_ocr.parse_usages_pane(boxes(USAGES_SCREEN[:9])) is None
+
+
+def test_usages_pane_with_no_usages():
+    pane = mac_ocr.parse_usages_pane(
+        boxes(
+            [
+                (848, 1027, 300, 28, "Q 'Foo' usages in all modules"),
+                (414, 1667, 300, 25, "No usages found"),
+            ]
+        )
+    )
+    assert pane is not None and pane.rows == [] and pane.total_usages == 0
+
+
+def test_element_rows_are_the_tree_row_then_the_properties_header():
+    rows = mac_ocr.element_rows(boxes(USAGES_SCREEN), "Order_CreateOrUpdateWrapper", 2160)
+    assert [(r.x, r.y) for r in rows] == [(1592, 986), (1545, 1061)]
+
+
+def test_element_rows_fold_ocr_confusions():
+    rows = mac_ocr.element_rows(boxes(USAGES_SCREEN), "Order_CreateInvoiceImports", 2160)
+    assert len(rows) == 1
+
+
+def test_find_text_ignores_menu_icons():
+    menu = boxes(
+        [
+            (22, 332, 200, 25, "Q Find Usages"),
+            (22, 396, 330, 25, "Q Find Usages in all Modules"),
+            (61, 41, 250, 25, "Add Input Parameter"),
+        ]
+    )
+    assert [b.y for b in mac_ocr.find_text(menu, mac_ocr.FIND_USAGES_ALL_ITEM)] == [396]
+
+
+SEARCH_DROPDOWN = [
+    (1312, 91, 31, 28, "Q"),
+    (1350, 94, 273, 22, "PrintOrderlnvoicePDF"),
+    (1394, 173, 505, 28, "Search in Order_CreateOrUpdateWrapper"),
+    (1397, 235, 245, 26, "Search in this Module"),
+    (1397, 301, 276, 22, "Search in other Modules"),
+    (1397, 364, 176, 25, "Search for Help"),
+    (1356, 427, 220, 31, "• Search in Forge"),
+    (1353, 493, 69, 28, "Logic"),
+    (1394, 556, 279, 22, "PrintOrderlnvoicePDF"),
+    (1617, 628, 427, 31, "PrintOrderInvoicePDF"),
+]
+
+
+def test_element_suggestion_is_the_dropdown_row_not_the_box_or_tree():
+    seen, found = mac_ocr.element_suggestions(boxes(SEARCH_DROPDOWN), "PrintOrderInvoicePDF")
+    assert seen is True
+    assert [(b.x, b.y) for b in found] == [(1394, 556)]
+
+
+def test_no_dropdown_no_suggestions():
+    assert mac_ocr.element_suggestions(boxes(SEARCH_DROPDOWN[:2]), "X") == (False, [])

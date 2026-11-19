@@ -53,6 +53,8 @@ NO_BUTTON_NAME = "No"
 OUTDATED_REFERENCES_TITLE = "Modified or missing references found"
 EXTENSION_TAG = "(extension)"
 CANCEL_BUTTON_NAME = "Cancel"
+LOCAL_USAGES_LABEL = "(local)"
+MAIN_WINDOW_TITLE = "Service Studio"
 
 
 class ShellTabKind(StrEnum):
@@ -305,6 +307,15 @@ def is_webview(window: WindowHandle) -> bool:
     return window.class_name == WEBVIEW_WIN32_CLASS
 
 
+class UsagesPane(BaseModel):
+    """Service Studio's Find Usages pane (all modules), as read from the screen."""
+
+    title: str  # the element name inside the pane tab's quotes, possibly cut short
+    rows: list[tuple[str, int]]  # (module name, or LOCAL_USAGES_LABEL for the module itself)
+    total_usages: int
+    consumer_modules: int
+
+
 class ModuleCaption(BaseModel):
     name: str
     application: str | None = None
@@ -337,6 +348,11 @@ _CONFUSABLES = str.maketrans({"l": "i", "1": "i", "|": "i", "!": "i", "0": "o"})
 
 def _fold_confusables(text: str) -> str:
     return text.translate(_CONFUSABLES)
+
+
+def fold_ocr(text: str) -> str:
+    """Casefolded, whitespace-normalized, with OCR-confusable characters folded."""
+    return _fold_confusables(" ".join(text.split()).casefold())
 
 
 def same_tree_label(label: str, name: str) -> bool:

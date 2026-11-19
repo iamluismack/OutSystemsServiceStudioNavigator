@@ -454,3 +454,147 @@ def checkbox_state(pixel: Any, cx: float, cy: float, scale: float) -> int | None
     if saturated < 0.4 or not white_rows:
         return None
     return 1 if max(white_rows) - min(white_rows) > 3.5 * scale else 2
+
+
+# --- Find Usages --------------------------------------------------------------------
+#
+# Observed layout (Service Studio 11.55 for Mac, main window at 2x): Cmd+F opens the
+# module search box in the toolbar with a drop-down: "Search in ..." rows (including
+# "Search in this Module"), then one section per element type listing the elements
+# whose name matches, left-aligned with those rows. Clicking an element suggestion
+# opens it and selects it in the elements tree (right panel); the properties panel
+# below the tree repeats the name as its header. Right-clicking the tree row opens a
+# native (Avalonia) context menu whose items AX exposes without text, so it is read
+# from a screenshot too. "Find Usages in all Modules" fills a bottom pane: a tab
+# "'<name>' usages in all modules", a table "Module Name | Usages" with one row per
+# module ("(local)" is the module itself, cells like "14 usages"), and the footer
+# "20 usages found in 2 consumer modules" next to a "Close" button. Tree rows may
+# start with an icon read as "• ".
+
+MODULE_SEARCH_ITEM = "Search in this Module"
+FIND_USAGES_ALL_ITEM = "Find Usages in all Modules"
+# The elements tree and the properties panel sit in the right part of the window.
+RIGHT_PANEL_MIN_X = 0.62
+_USAGES_FOOTER = re.compile(
+    r"(?P<total>\d[\d,.\s]*)\s+usages?\s+found\s+in\s+(?P<modules>\d[\d,.\s]*)\s+consumer\s+modules?",
+    re.IGNORECASE,
+)
+_NO_USAGES = re.compile(r"\bno\s+usages?\s+found\b", re.IGNORECASE)
+_USAGE_COUNT = re.compile(r"(\d[\d,.]*)\s*usages?", re.IGNORECASE)
+_MENU_ICON = re.compile(r"^(?:Q|O|o|0|[^\w(]+)\s+")
+
+
+def _number(text: str) -> int:
+    return int(re.sub(r"\D", "", text))
+
+
+def find_text(boxes: list[TextBox], text: str) -> list[TextBox]:
+    """Boxes that read ``text`` (a menu or drop-down item), ignoring a leading icon."""
+    wanted = " ".join(text.split()).casefold()
+    found = []
+    for box in boxes:
+        read = " ".join(box.text.split())
+        if read.casefold() == wanted or _MENU_ICON.sub("", read).casefold() == wanted:
+            found.append(box)
+    return found
+
+
+def element_suggestions(boxes: list[TextBox], name: str) -> tuple[bool, list[TextBox]]:
+    """Element suggestions named ``name`` in the module search drop-down.
+
+    Returns (drop-down seen, suggestions). The drop-down's rows ("Search in this
+    Module", ..., then one section per element type with matching elements) are
+    left-aligned; tree rows behind it start further right.
+    """
+    anchors = find_text(boxes, MODULE_SEARCH_ITEM)
+    if len(anchors) != 1:
+        return False, []
+    anchor = anchors[0]
+    found = [
+        b
+        for b in boxes
+        if b.y > anchor.y
+        and abs(b.x - anchor.x) <= anchor.h * 2
+        and ss.same_tree_label(_clean_label(b.text)[0], name)
+    ]
+    return True, found
+
+
+def element_rows(boxes: list[TextBox], name: str, width: float) -> list[TextBox]:
+    """Boxes in the right panel (elements tree and properties) that show ``name``.
+
+    Top to bottom; the first is the tree row, the next the properties panel header.
+    """
+    matches = [
+        b
+        for b in boxes
+        if b.x >= width * RIGHT_PANEL_MIN_X and ss.same_tree_label(_clean_label(b.text)[0], name)
+    ]
+    return sorted(matches, key=lambda b: b.y)
+
+
+def _pane_title(boxes: list[TextBox]) -> str:
+    for box in boxes:
+        text = box.text.strip()
+        if "usage" not in text.casefold() or "'" not in text:
+            continue
+        inner = text.split("'", 2)
+        if len(inner) >= 2 and inner[1]:
+            return inner[1].strip()
+    return ""
+
+
+def parse_usages_pane(boxes: list[TextBox]) -> ss.UsagesPane | None:
+    """Read the Find Usages pane, or None while its footer is not shown."""
+    footer_box = next((b for b in boxes if _USAGES_FOOTER.search(b.text)), None)
+    if footer_box is None:
+        empty = next((b for b in boxes if _NO_USAGES.search(b.text)), None)
+        if empty is None:
+            return None
+        return ss.UsagesPane(title=_pane_title(boxes), rows=[], total_usages=0, consumer_modules=0)
+    match = _USAGES_FOOTER.search(footer_box.text)
+    assert match is not None
+    total, consumers = _number(match["total"]), _number(match["modules"])
+
+    module_header = next((b for b in boxes if b.text.strip() == "Module Name"), None)
+    if module_header is None:
+        return ss.UsagesPane(
+            title=_pane_title(boxes), rows=[], total_usages=total, consumer_modules=consumers
+        )
+    same_line = [
+        b
+        for b in boxes
+        if abs(b.cy - module_header.cy) <= module_header.h * 0.6 and b.x > module_header.x
+    ]
+    usages_header = next((b for b in same_line if b.text.strip().startswith("Usages")), None)
+    split = usages_header.x - module_header.h if usages_header else module_header.x + 300
+    # The pane ends at its footer's "Close" button; the properties panel is further right.
+    close = next(
+        (
+            b
+            for b in boxes
+            if b.text.strip() == "Close" and abs(b.cy - footer_box.cy) <= footer_box.h
+        ),
+        None,
+    )
+    right_limit = close.x + close.w if close else split + 2 * (split - module_header.x)
+    header_bottom = module_header.y + module_header.h
+    body = [
+        b
+        for b in boxes
+        if header_bottom < b.y
+        and b.y + b.h <= footer_box.y
+        and module_header.x - module_header.h <= b.x < right_limit
+    ]
+    rows: list[tuple[str, int]] = []
+    for line in _group_lines(body):
+        ordered = sorted(line, key=lambda b: b.x)
+        left = " ".join(b.text.strip() for b in ordered if b.x < split).strip()
+        right = " ".join(b.text.strip() for b in ordered if b.x >= split)
+        count = _USAGE_COUNT.search(right)
+        if left and count:
+            # Module names have no spaces; anything after the first space is OCR noise.
+            rows.append((left.split()[0], _number(count[1])))
+    return ss.UsagesPane(
+        title=_pane_title(boxes), rows=rows, total_usages=total, consumer_modules=consumers
+    )

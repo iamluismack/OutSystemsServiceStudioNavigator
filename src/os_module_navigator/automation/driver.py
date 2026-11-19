@@ -20,6 +20,7 @@ from os_module_navigator.errors import (
     ServiceStudioNotRunningError,
     ServiceStudioWindowNotFoundError,
     UnexpectedDialogError,
+    UnsupportedPlatformError,
 )
 
 
@@ -58,6 +59,10 @@ class ServiceStudioDriver(Protocol):
     def press_dependency_refresh(self) -> bool: ...
     def dismiss_outdated_references_prompt(self) -> None: ...
     def cancel_dependencies_dialog(self) -> None: ...
+    def select_element(self, name: str, timeout_s: float, poll_s: float) -> None: ...
+    def open_usages_in_all_modules(self, name: str, timeout_s: float, poll_s: float) -> None: ...
+    def read_usages(self) -> ss.UsagesPane | None: ...
+    def dismiss_popups(self) -> None: ...
 
 
 class LiveServiceStudioDriver:
@@ -436,3 +441,18 @@ class LiveServiceStudioDriver:
         if self._deps_dialog() is None:
             return
         actions.invoke(self._deps_element("Button", ss.CANCEL_BUTTON_NAME))
+
+    # --- Find Usages (not implemented on Windows yet) ---------------------------------
+    _NO_USAGES = "find_usages is only available on macOS for now."
+
+    def select_element(self, name: str, timeout_s: float, poll_s: float) -> None:
+        raise UnsupportedPlatformError(self._NO_USAGES)
+
+    def open_usages_in_all_modules(self, name: str, timeout_s: float, poll_s: float) -> None:
+        raise UnsupportedPlatformError(self._NO_USAGES)
+
+    def read_usages(self) -> ss.UsagesPane | None:
+        raise UnsupportedPlatformError(self._NO_USAGES)
+
+    def dismiss_popups(self) -> None:
+        return None

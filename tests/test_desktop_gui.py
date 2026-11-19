@@ -15,6 +15,7 @@ from os_module_navigator.errors import (
     DependencyChangeFailedError,
     DependencyElementNotFoundError,
     DependencyNotFoundError,
+    ElementNotFoundError,
     ModuleNotFoundInEnvironmentError,
     ModuleNotOpenError,
     NavigatorError,
@@ -283,6 +284,40 @@ class FakeDriver:
 
     def called(self, name):
         return [c for c in self.calls if c[0] == name]
+
+    # --- Find Usages simulation ---
+    ELEMENTS_IN_MODULE: ClassVar[set[str]] = {"Order_CreateOrUpdateWrapper"}
+    USAGES: ClassVar[list[tuple[str, int]]] = [("(local)", 14), ("Shipping_BL", 6)]
+    usages_footer = (20, 2)
+    usages_delay_reads = 1
+    selected_element: str | None = None
+    usages_pane: ss.UsagesPane | None = None
+
+    def select_element(self, name, timeout_s, poll_s):
+        self.calls.append(("select_element", name))
+        if name not in self.ELEMENTS_IN_MODULE:
+            raise ElementNotFoundError(f"no {name}")
+        self.selected_element = name
+
+    def open_usages_in_all_modules(self, name, timeout_s, poll_s):
+        self.calls.append(("open_usages_in_all_modules", name))
+        assert self.selected_element == name
+        self._reads_left = self.usages_delay_reads
+        self.usages_pane = ss.UsagesPane(
+            title=name,
+            rows=list(self.USAGES),
+            total_usages=self.usages_footer[0],
+            consumer_modules=self.usages_footer[1],
+        )
+
+    def read_usages(self):
+        if getattr(self, "_reads_left", 0) > 0:
+            self._reads_left -= 1
+            return None
+        return self.usages_pane
+
+    def dismiss_popups(self):
+        self.calls.append(("dismiss_popups",))
 
 
 CATALOGUE = [row("DGA_UI", "DGA UI"), row("MOD_DGA_UI", "MOD DGA UI"), row("Other", "Other App")]
@@ -873,3 +908,65 @@ def test_dependency_label_tolerates_icon_and_confusables():
 
     assert same_tree_label("xit UItimatePDF", "UltimatePDF")
     assert not same_tree_label("xit UltimatePDF_Utils", "UltimatePDF")
+
+
+def _usages_driver():
+    tabs = [ENV, editor("Orders_BL (Orders Business Logic)"), editor("Other (App)", True)]
+    return FakeDriver(CATALOGUE, tabs)
+
+
+def test_find_usages_brings_module_to_front_and_maps_local():
+    driver = _usages_driver()
+    result = navigator(driver).find_usages("orders_bl", "Order_CreateOrUpdateWrapper")
+    assert driver.called("select_tab") == [("select_tab", 1)]
+    assert result.module_name == "Orders_BL"
+    assert [(m.module_name, m.usages, m.is_producer) for m in result.modules] == [
+        ("Orders_BL", 14, True),
+        ("Shipping_BL", 6, False),
+    ]
+    assert (result.total_usages, result.consumer_modules_count) == (20, 2)
+    assert result.possibly_truncated is False
+    assert "Shipping_BL" in result.message
+
+
+def test_find_usages_flags_truncated_lists():
+    driver = _usages_driver()
+    driver.usages_footer = (40, 3)
+    result = navigator(driver).find_usages("Orders_BL", "Order_CreateOrUpdateWrapper")
+    assert result.possibly_truncated is True
+
+
+def test_find_usages_requires_the_module_open():
+    with pytest.raises(ModuleNotOpenError):
+        navigator(_usages_driver()).find_usages("Missing_BL", "X")
+
+
+def test_find_usages_unknown_element_closes_popups():
+    driver = _usages_driver()
+    with pytest.raises(ElementNotFoundError):
+        navigator(driver).find_usages("Orders_BL", "Nope")
+    assert driver.called("dismiss_popups")
+    assert not driver.called("open_usages_in_all_modules")
+
+
+def test_find_usages_ignores_a_pane_for_another_element():
+    driver = _usages_driver()
+    driver.usages_delay_reads = 0
+    nav = navigator(driver, usages_timeout_s=5)
+    original = driver.open_usages_in_all_modules
+
+    def stale(name, timeout_s, poll_s):
+        original(name, timeout_s, poll_s)
+        driver.usages_pane = driver.usages_pane.model_copy(update={"title": "SomethingElse"})
+
+    driver.open_usages_in_all_modules = stale
+    with pytest.raises(AutomationTimeoutError):
+        nav.find_usages("Orders_BL", "Order_CreateOrUpdateWrapper")
+
+
+@pytest.mark.parametrize("name", ["", "two words", "x" * 300])
+def test_find_usages_rejects_bad_element_names(name):
+    driver = _usages_driver()
+    with pytest.raises(NavigatorError):
+        navigator(driver).find_usages("Orders_BL", name)
+    assert not driver.called("select_element")

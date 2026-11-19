@@ -31,6 +31,7 @@ from os_module_navigator.errors import (
 from os_module_navigator.models import (
     CloseModuleResult,
     DependencyChangeResult,
+    FindUsagesResult,
     ModuleInfo,
     OpenModuleResult,
     OpenModulesResult,
@@ -81,6 +82,13 @@ dialog's Refresh all button, or only one dependency's) and applies; the
 official omlRefreshReferences tool does the same in-process. After adding,
 call the official listApps to confirm the new reference. Do not call these in the middle of an
 applyModelApiCode chain: merge first, then change dependencies.
+FINDING USAGES (the official MCP only sees open modules, so it cannot list who
+consumes an element): find_usages(module_name, element_name) runs Service
+Studio's "Find Usages in all Modules" on an element of an OPEN module (the
+producer) and returns every module that uses it with its usage count. It opens
+the element through the module search (Cmd+F), right-clicks it in the elements
+tree and reads the result pane; nothing is changed. Then open the consumer
+modules and read the callers with the official MCP.
 These tools never save or publish modules, and close only modules with
 no unsaved changes. open_module briefly brings Service Studio to the
 foreground and sends Up/Down keys to its search dialog, so avoid typing in
@@ -366,6 +374,42 @@ def build_server(service: ModuleService) -> FastMCP:
         'up_to_date' means nothing was outdated. Does not save or publish."""
         try:
             return await service.refresh_dependencies(module_name, dependency_name)
+        except NavigatorError as error:
+            raise to_tool_error(error) from error
+
+    @mcp.tool(
+        annotations={
+            "title": "Find usages of an element in all modules",
+            "readOnlyHint": True,
+            "openWorldHint": False,
+        },
+    )
+    async def find_usages(
+        module_name: Annotated[
+            str,
+            Field(
+                description="Exact name of the OPEN module that owns the element.",
+                min_length=1,
+                max_length=200,
+            ),
+        ],
+        element_name: Annotated[
+            str,
+            Field(
+                description="Exact name of the element (action, entity, structure, block...).",
+                min_length=1,
+                max_length=200,
+            ),
+        ],
+    ) -> FindUsagesResult:
+        """Run Service Studio's 'Find Usages in all Modules' on an element of an open
+        module and return each module that uses it (is_producer marks the owner,
+        shown by Service Studio as '(local)') with its usage count, plus the
+        footer totals. Fails with module_not_open, element_not_found (no single
+        element with that name; for a name shared by several elements, use a
+        unique one) or usages_unavailable. Does not change the module."""
+        try:
+            return await service.find_usages(module_name, element_name)
         except NavigatorError as error:
             raise to_tool_error(error) from error
 

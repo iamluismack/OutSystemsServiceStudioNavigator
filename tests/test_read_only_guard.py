@@ -98,7 +98,24 @@ def _functions_using(path: Path, needle: str) -> set[str]:
 def test_mac_mouse_clicks_only_through_the_guarded_helpers():
     """Clicks are built in one place and reached only through hit-tested entry points."""
     assert _functions_using(MAC_ACTIONS, "CGEventCreateMouseEvent") == {"_hid_click"}
-    assert _functions_using(MAC_ACTIONS, "_hid_click(") == {"click_tab", "click_in_window"}
+    assert _functions_using(MAC_ACTIONS, "_hid_click(") == {
+        "click_tab",
+        "click_in_window",
+        "right_click_in_window",
+        "click_menu_item",
+    }
+
+
+def test_mac_right_click_only_opens_a_menu_and_menu_clicks_are_hit_tested():
+    """A right click never activates anything by itself; a menu item is clicked only
+    after the hit test confirmed an AXMenuItem of that menu window."""
+    assert _functions_using(MAC_ACTIONS, "right=True") == {"right_click_in_window"}
+    assert (
+        "AXMenuItem"
+        in MAC_ACTIONS.read_text(encoding="utf-8")
+        .split("def click_menu_item", 1)[1]
+        .split("\ndef ", 1)[0]
+    )
 
 
 def test_mac_allowed_keys_never_include_quit():
