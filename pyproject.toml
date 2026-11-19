@@ -1,7 +1,7 @@
 [project]
 name = "os-module-navigator"
 version = "0.1.0"
-description = "Local MCP server that navigates the OutSystems Service Studio 11 desktop GUI (Windows and macOS) to find and open modules."
+description = "Local MCP server that drives the OutSystems Service Studio 11 desktop GUI (Windows and macOS): find and open modules, manage dependencies and find usages."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
