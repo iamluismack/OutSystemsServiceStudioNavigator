@@ -278,13 +278,19 @@ class MacServiceStudioDriver:
     def _window_titled(self, pid: int, title: str) -> mac_ax.MacWindow | None:
         return next((w for w in self._dialogs(pid) if w.title == title), None)
 
-    def _deps_window(self, pid: int) -> mac_ax.MacWindow:
-        window = self._window_titled(pid, ss.MANAGE_DEPENDENCIES_TITLE)
-        if window is None:
-            raise DependenciesDialogUnavailableError(
-                "The 'Manage Dependencies' dialog is not open."
-            )
-        return window
+    def _deps_window(self, pid: int, wait_s: float = 6.0) -> mac_ax.MacWindow:
+        # On a large module the dialog window can vanish for a moment while it is
+        # re-created during its first render, so wait a little before giving up.
+        deadline = time.monotonic() + wait_s
+        while True:
+            window = self._window_titled(pid, ss.MANAGE_DEPENDENCIES_TITLE)
+            if window is not None:
+                return window
+            if time.monotonic() >= deadline:
+                raise DependenciesDialogUnavailableError(
+                    "The 'Manage Dependencies' dialog is not open."
+                )
+            time.sleep(0.3)
 
     def _deps_view(self) -> _DepsView:
         pid = self._pid()
@@ -348,7 +354,10 @@ class MacServiceStudioDriver:
                 t in ss.TRANSIENT_DIALOG_TITLES for t in titles
             ):
                 time.sleep(max(poll_s, 1.0))  # let the lists render
-                return
+                # Return only once the window is still there after the render pause.
+                if self._window_titled(pid, ss.MANAGE_DEPENDENCIES_TITLE) is not None:
+                    return
+                continue
             unexpected = [
                 t
                 for t in titles
@@ -364,7 +373,9 @@ class MacServiceStudioDriver:
                     f"Service Studio opened {unexpected[0]!r} instead of 'Manage Dependencies'; "
                     "it was closed."
                 )
-            if not retried and not titles and time.monotonic() - started > min(5.0, timeout_s / 3):
+            # A large module can take well over 5 s to open the dialog; a second click
+            # sent meanwhile is swallowed or closes it again, so wait longer first.
+            if not retried and not titles and time.monotonic() - started > max(15.0, timeout_s / 2):
                 retried = True
                 mac_actions.click_in_window(pid, main.element, button)
             time.sleep(poll_s)
@@ -432,15 +443,23 @@ class MacServiceStudioDriver:
         for i, row in enumerate(view.layout.elements):
             box = row.box
             state = mac_ocr.checkbox_state(view.shot.pixel, *box, view.scale)
-            if (
-                state is None
-                and i > 0
-                and mac_ocr.is_selection_fill(view.shot.pixel, *box, view.scale)
-            ):
-                # A selected row is drawn on the accent colour and Vision may place its
-                # text differently, so the indentation level can come out wrong. Try
-                # the neighbouring levels; accept only a position with a real checkbox.
-                for k in (1, 2, 3, -1, -2):
+            if state is None and i == 0:
+                # The module root: its icon can shift where Vision places the label.
+                for k in (-1, 1, -2, 2):
+                    found = mac_ocr.checkbox_state(
+                        view.shot.pixel, box[0] + k * step, box[1], view.scale
+                    )
+                    if found is not None:
+                        box, state = (box[0] + k * step, box[1]), found
+                        break
+            if state is None and i > 0:
+                # The indentation level comes from where Vision places the label, which
+                # varies: a selected row is drawn on the accent colour, and an element's
+                # icon is sometimes read as text and sometimes folded into the label box
+                # (seen on a server action inside a folder: one level too far left).
+                # Try the neighbouring levels on the same line; accept only a position
+                # with a real checkbox.
+                for k in (1, -1, 2, -2, 3):
                     x = box[0] + k * step
                     if x < origin_x:
                         continue
@@ -448,6 +467,11 @@ class MacServiceStudioDriver:
                     if found is not None:
                         box, state = (x, box[1]), found
                         break
+            if state is None and i == 0:
+                # Keep the module root as the first row even when its checkbox is not
+                # read, so callers never mistake the first element for the module.
+                # Its state is resolved from the element rows below.
+                state = -1
             if state is None:
                 continue  # an element this module cannot reference (no checkbox)
             query = self._dependency_query if i == 0 else self._element_query
@@ -456,8 +480,21 @@ class MacServiceStudioDriver:
             )
         return rows
 
+    @staticmethod
+    def _resolve_root_state(rows: list[DependencyCheckbox]) -> list[DependencyCheckbox]:
+        if rows and rows[0].state == -1:
+            children = [r.state for r in rows[1:]]
+            if children and all(c == 1 for c in children):
+                state = 1
+            elif any(c in (1, 2) for c in children):
+                state = 2
+            else:
+                state = 0
+            rows[0] = DependencyCheckbox(rows[0].element, rows[0].label, state, rows[0].top)
+        return rows
+
     def read_dependency_checkboxes(self) -> list[DependencyCheckbox]:
-        return self._checkboxes(self._deps_view())
+        return self._resolve_root_state(self._checkboxes(self._deps_view()))
 
     def toggle_dependency_checkbox(self, label: str, key_delay_s: float) -> None:
         view = self._deps_view()
@@ -477,7 +514,7 @@ class MacServiceStudioDriver:
         self._click(view, *rows[0].element)
 
     def read_dependency_root(self) -> DependencyRoot | None:
-        rows = self._checkboxes(self._deps_view())
+        rows = self._resolve_root_state(self._checkboxes(self._deps_view()))
         if not rows:
             return None
         return DependencyRoot(element=rows[0].element, label=rows[0].label, state=rows[0].state)

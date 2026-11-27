@@ -361,14 +361,24 @@ def same_tree_label(label: str, name: str) -> bool:
     On macOS, Vision sometimes reads the icon in front of a module or element
     name as a few characters (e.g. "JO PdfTools_IS"). OutSystems module and
     element names contain no spaces, so a prefix of at most 3 characters before
-    the last space is treated as that icon.
+    the last space is treated as that icon. An outdated reference shows a refresh
+    icon after the name, read as a suffix of at most 2 characters (e.g.
+    "ProductCS S" or "Product CS S"); there Vision may also drop an underscore or
+    read it as a space, so both are ignored.
     """
     label_n = _fold_confusables(" ".join(label.split()).casefold())
     name_n = _fold_confusables(" ".join(name.split()).casefold())
     if label_n == name_n:
         return True
     prefix, sep, rest = label_n.rpartition(" ")
-    return bool(sep) and rest == name_n and len(prefix) <= 3
+    if bool(sep) and rest == name_n and len(prefix) <= 3:
+        return True
+    head, sep, suffix = label_n.rpartition(" ")
+    return (
+        bool(sep)
+        and len(suffix) <= 2
+        and head.replace("_", "").replace(" ", "") == name_n.replace("_", "")
+    )
 
 
 def same_module_name(a: str, b: str) -> bool:

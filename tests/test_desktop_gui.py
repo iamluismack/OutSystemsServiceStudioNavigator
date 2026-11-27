@@ -739,12 +739,20 @@ def test_dialog_after_apply_is_reported():
         nav.change_dependency("M1", "OutSystemsUI", add=False)
 
 
-def test_dependencies_dialog_already_open_is_refused():
+def test_dependencies_dialog_already_open_for_another_module_is_refused():
     driver, nav = deps_nav()
     driver.state.dialogs.append(ss.MANAGE_DEPENDENCIES_TITLE)
     with pytest.raises(UnexpectedDialogError):
-        nav.change_dependency("M1", "OutSystemsUI", add=True)
+        nav.change_dependency("M2", "OutSystemsUI", add=True)
     assert not driver.called("open_dependencies_dialog")
+
+
+def test_dependencies_dialog_already_open_for_the_selected_module_is_reused():
+    driver, nav = deps_nav()
+    driver.state.dialogs.append(ss.MANAGE_DEPENDENCIES_TITLE)
+    result = nav.change_dependency("M1", "OutSystemsCharts", add=True)
+    assert result.status == "applied"
+    assert driver.called("open_dependencies_dialog")
 
 
 def test_add_single_element_toggles_only_that_element():

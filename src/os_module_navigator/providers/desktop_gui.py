@@ -82,6 +82,12 @@ def _same_dependency_label(label: str, name: str) -> bool:
     return ss.same_tree_label(label, name)
 
 
+def _strip_icon_token(name: str) -> str:
+    """Drop a trailing one- or two-character token that text recognition took from an icon."""
+    head, sep, tail = name.strip().rpartition(" ")
+    return head if sep and head and len(tail) <= 2 else name
+
+
 def _to_module(row: ss.ModuleSearchRow) -> ModuleInfo:
     cells = row.cells
     return ModuleInfo(
@@ -304,9 +310,13 @@ class DesktopGUINavigator:
             stable = stable + 1 if rows == previous else 0
             previous = rows
             matches = bool(rows) and all(needle in _normalize(name) for name, _ in rows)
-            if (matches and stable >= 1) or (rows != before and stable >= 2):
+            if matches and stable >= 1:
                 return rows
             if self._clock() > deadline:
+                # Text recognition may misread a name, so a changed, settled list that
+                # does not match exactly is still used once the wait is over.
+                if rows != before and stable >= 2:
+                    return rows
                 raise AutomationTimeoutError("Dependency list did not update in time.")
 
     def _wait_tab_selected(self, module_name: str) -> None:
@@ -318,18 +328,31 @@ class DesktopGUINavigator:
             self._sleep(self.config.poll_interval_s)
         raise AutomationTimeoutError(f"The tab of {module_name!r} could not be brought to front.")
 
-    def _stable_dependency_root(self) -> DependencyRoot | None:
-        """Read the elements tree root once it stops changing (Chromium renders lazily)."""
+    def _stable_dependency_root(self, previous_label: str | None = None) -> DependencyRoot | None:
+        """Read the elements tree root once it stops changing (Chromium renders lazily).
+
+        A large module takes several seconds to load its elements after it is selected,
+        and the tree keeps showing the previous module meanwhile. With ``previous_label``,
+        keep waiting (up to ``element_select_timeout_s``) until the root shows another
+        module and stays the same for two reads.
+        """
+        deadline = self._clock() + self.config.element_select_timeout_s
         previous: tuple[str, int] | None = None
         root: DependencyRoot | None = None
-        for _ in range(6):
+        stable = 0
+        while True:
             self._sleep(self.config.poll_interval_s)
             root = self.driver.read_dependency_root()
             current = (root.label, root.state) if root else None
-            if current is not None and current == previous:
-                return root
+            changed = current is not None and (
+                previous_label is None or not _same_dependency_label(current[0], previous_label)
+            )
+            stable = stable + 1 if changed and current == previous else 0
             previous = current
-        return root
+            if stable >= 2:
+                return root
+            if self._clock() > deadline:
+                return root
 
     def _select_dependency(self, row_name: str, rendered_rows: int) -> DependencyRoot:
         """Move down the module list until the elements tree shows ``row_name``.
@@ -343,7 +366,7 @@ class DesktopGUINavigator:
         visited: list[str] = []
         for _ in range(rendered_rows + 2):
             self.driver.press_dependency_key("{DOWN}", self.config.key_delay_s)
-            root = self._stable_dependency_root()
+            root = self._stable_dependency_root(seen or None)
             if root is None:
                 continue
             seen = root.label
@@ -525,6 +548,18 @@ class DesktopGUINavigator:
 
     def _open_dependencies_for(self, module_name: str) -> str:
         """Bring the open module's tab to the front and open Manage Dependencies on it."""
+        current = self.driver.read_state()
+        if [d for d in current.dialogs if d != ss.OPEN_FROM_ENVIRONMENT_TITLE] == [
+            ss.MANAGE_DEPENDENCIES_TITLE
+        ]:
+            # A Manage Dependencies dialog left open (it opened after an earlier call
+            # gave up) belongs to the selected tab: reuse it when that is this module.
+            for _, tab, caption in _module_tabs(current):
+                if tab.selected and ss.same_module_name(caption.name, module_name):
+                    self.driver.open_dependencies_dialog(
+                        self.config.dialog_open_timeout_s, self.config.poll_interval_s
+                    )
+                    return caption.name
         state = self._ready_state(require_connected=False)
         tabs = _module_tabs(state)
         match = next((m for m in tabs if ss.same_module_name(m[2].name, module_name)), None)
@@ -606,6 +641,16 @@ class DesktopGUINavigator:
         exact = [
             i for i, (name, _) in enumerate(rows) if ss.same_module_name(name, dependency_name)
         ]
+        if not exact:
+            # Text recognition can read a row icon as a short trailing token
+            # ("Product_CS S"). Module names have no spaces, so drop it.
+            exact = [
+                i
+                for i, (name, _) in enumerate(rows)
+                if ss.same_module_name(_strip_icon_token(name), dependency_name)
+            ]
+            if len(exact) == 1:
+                return dependency_name
         if not exact:
             raise DependencyNotFoundError(
                 f"No module named {dependency_name!r} is available as a dependency.",
